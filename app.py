@@ -307,10 +307,9 @@ with tab_mapa:
 
         # Agregar casos por provincia
         casos_prov = riesgo_filtrado.groupby('provincia').agg(
-            casos_totales=('casos_dengue', 'sum'),
-            riesgo_medio=('riesgo_mult', 'mean'),
-            deptos_alto=('nivel_mult', lambda x: (x == 'alto').sum()),
-            deptos_total=('nivel_mult', 'count')
+           casos_totales=('casos_dengue', 'sum'),
+           deptos_alto=('nivel_mult', lambda x: (x == 'alto').sum()),
+           deptos_total=('depto_id_norm', 'count')
         ).reset_index()
 
         # Métricas
