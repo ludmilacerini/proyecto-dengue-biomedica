@@ -3,3 +3,6 @@ starlette<0.39.0
 pandas
 numpy
 plotly
+shapely
+folium
+streamlit-folium
