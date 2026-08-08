@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
 
 # ── CONFIGURACIÓN ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -12,7 +14,7 @@ st.set_page_config(
 
 
 # ── CARGA DE DATOS CON CACHE ───────────────────────────────────────────────────
-@st.cache_data
+@st.cache_data(ttl=300)
 def cargar_datos():
     pred = pd.read_csv("datos/predicciones.csv")
     hist = pd.read_csv("datos/dataset_provincial_escalado.csv")
@@ -377,6 +379,7 @@ with tab_pred:
     )
 
     st.plotly_chart(fig, use_container_width=True)
+    
 
     with st.expander("📋 Ver tabla de predicciones semana a semana"):
         if len(pred_prov) > 0:
@@ -624,60 +627,112 @@ with tab_mapa:
             if prov_geo == prov_actual:
                 features_filtradas.append(feat)
 
+        # Calcular centroide de la provincia para centrar el mapa
+        features_prov = [f for f in geo_dept['features'] if f['properties']['provincia'] == prov_actual]
+        all_lats, all_lons = [], []
+        for feat in features_prov:
+            for c in feat['geometry']['coordinates'][0]:
+                all_lons.append(c[0])
+                all_lats.append(c[1])
+        centro_lat = sum(all_lats) / len(all_lats) if all_lats else -38
+        centro_lon = sum(all_lons) / len(all_lons) if all_lons else -63
+
+        # Zoom según tamaño de la provincia
+        lat_span = max(all_lats) - min(all_lats) if all_lats else 5
+        if lat_span < 0.3:
+            zoom = 11
+        elif lat_span < 1:
+            zoom = 9
+        elif lat_span < 3:
+            zoom = 7
+        elif lat_span < 6:
+            zoom = 6
+        else:
+            zoom = 5
+
+        # Colores por nivel de riesgo
+        color_map = {'bajo': '#16a34a', 'medio': '#d97706', 'alto': '#dc2626'}
+        riesgo_dict = dict(zip(
+            riesgo_prov['depto_id_norm'].astype(str),
+            riesgo_prov['nivel_mult']
+        ))
+        casos_dept_dict = dict(zip(
+            riesgo_prov['depto_id_norm'].astype(str),
+            riesgo_prov['casos_dengue']
+        ))
+        nombre_dept_dict = dict(zip(
+            riesgo_prov['depto_id_norm'].astype(str),
+            riesgo_prov['depto_nombre']
+        ))
+        clima_dict = dict(zip(
+            riesgo_prov['depto_id_norm'].astype(str),
+            riesgo_prov['factor_clima']
+        ))
+        nbi_dict = dict(zip(
+            riesgo_prov['depto_id_norm'].astype(str),
+            riesgo_prov['score_terreno']
+        ))
+
+        # Construir mapa Folium departamental
+        m_dept = folium.Map(
+            location=[centro_lat, centro_lon],
+            zoom_start=zoom,
+            tiles='CartoDB positron',
+            scrollWheelZoom=True,
+        )
+
         geo_prov_filtrado = {
-            "type": "FeatureCollection",
-            "features": features_filtradas,
+            'type': 'FeatureCollection',
+            'features': features_prov
         }
 
-        fig_dept = px.choropleth(
-            riesgo_prov,
-            geojson=geo_prov_filtrado,
-            locations="depto_id_norm",
-            featureidkey="properties.depto_id",
-            color="nivel_num",
-            color_continuous_scale=[
-                [0.0, "#3fb950"],
-                [0.5, "#d29922"],
-                [1.0, "#f85149"],
-            ],
-            range_color=[1, 3],
-            hover_name="depto_nombre",
-            hover_data={
-                "nivel_label": True,
-                "casos_dengue": True,
-                "factor_clima": ":.3f",
-                "score_terreno": ":.3f",
-                "nivel_num": False,
-                "depto_id_norm": False,
-            },
-            labels={
-                "nivel_label": "Nivel de riesgo",
-                "casos_dengue": "Casos",
-                "factor_clima": "Factor climático",
-                "score_terreno": "Score estructural",
-            },
-        )
-        fig_dept.update_geos(
-            visible=True,
-            fitbounds="locations",
-            showland=True,
-            landcolor="#1c2128",
-            showocean=True,
-            oceancolor="#0d1117",
-            showcountries=True,
-            countrycolor="#30363d",
-            showcoastlines=False,
-            bgcolor="#0d1117",
-        )
-        fig_dept.update_layout(
-            paper_bgcolor="#0d1117",
-            plot_bgcolor="#0d1117",
-            font_color="#c9d1d9",
-            margin=dict(l=0, r=0, t=10, b=0),
-            height=620,
-            coloraxis_showscale=False,
-        )
-        st.plotly_chart(fig_dept, use_container_width=True)
+        for feat in features_prov:
+            did = str(feat['properties']['depto_id'])
+            nivel = riesgo_dict.get(did, 'bajo')
+            color = color_map.get(nivel, '#16a34a')
+            nombre = nombre_dept_dict.get(did, feat['properties']['nombre'])
+            casos = casos_dept_dict.get(did, 0)
+            clima = clima_dict.get(did, 0)
+            nbi = nbi_dict.get(did, 0)
+
+            folium.GeoJson(
+                feat,
+                style_function=lambda x, c=color: {
+                    'fillColor': c,
+                    'color': '#64748b',
+                    'weight': 1,
+                    'fillOpacity': 0.75,
+                },
+                highlight_function=lambda x: {
+                    'fillOpacity': 0.95,
+                    'weight': 2.5,
+                    'color': '#1a56db',
+                },
+                tooltip=folium.Tooltip(
+                    f"<b>{nombre}</b><br>"
+                    f"Nivel: <b>{nivel.capitalize()}</b><br>"
+                    f"Casos: {int(casos)}<br>"
+                    f"Factor climático: {clima:.3f}<br>"
+                    f"Score estructural: {nbi:.3f}",
+                    sticky=True
+                ),
+            ).add_to(m_dept)
+
+        # Leyenda departamental
+        legend_html_dept = """
+        <div style="position: fixed; bottom: 30px; left: 30px; z-index: 1000;
+                    background: white; padding: 12px 16px; border-radius: 8px;
+                    border: 1px solid #e5e7eb; font-family: Inter, sans-serif; font-size: 12px;">
+            <div style="font-weight: 600; margin-bottom: 8px; color: #374151;">Nivel de riesgo</div>
+            <div><span style="display:inline-block;width:12px;height:12px;background:#16a34a;border-radius:50%;margin-right:6px;"></span>Bajo</div>
+            <div><span style="display:inline-block;width:12px;height:12px;background:#d97706;border-radius:50%;margin-right:6px;"></span>Medio</div>
+            <div><span style="display:inline-block;width:12px;height:12px;background:#dc2626;border-radius:50%;margin-right:6px;"></span>Alto</div>
+            <div style="color:#9ca3af; margin-top:6px; font-size:10px;">Índice climático + NBI</div>
+        </div>
+        """
+        m_dept.get_root().html.add_child(folium.Element(legend_html_dept))
+
+        st_folium(m_dept, height=600, use_container_width=True, returned_objects=[])
 
         with st.expander("📋 Ver tabla de departamentos"):
             tabla_dept = riesgo_prov[
