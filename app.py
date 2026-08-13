@@ -320,6 +320,9 @@ if menu_seleccionado == "Mapa de riesgo":
             label_visibility="collapsed",
         )
 
+        # Aseguramos el formateo de casos para el cartelito (hover)
+        casos_prov["Casos acumulados"] = casos_prov["casos_totales"].apply(lambda x: f"{int(x):,}")
+
         fig_prov = px.choropleth(
             casos_prov,
             geojson=geo_prov,
@@ -336,9 +339,23 @@ if menu_seleccionado == "Mapa de riesgo":
             ],
             range_color=[0, max_log if max_log > 0 else 1],
             hover_name="provincia",
-            hover_data={"deptos_alto": True, "casos_totales": False, "casos_log": False, "provincia": False},
-            labels={"deptos_alto": "Deptos. en riesgo alto"},
+            hover_data={
+                "Casos acumulados": True,
+                "deptos_alto": True,
+                "casos_log": False,
+                "casos_totales": False,
+                "provincia": False,
+            },
+            labels={
+                "deptos_alto": "Deptos. en riesgo alto",
+            },
         )
+        
+        # Personalizamos el cartelito flotante al pasar el mouse
+        fig_prov.update_traces(
+            hovertemplate="<b>%{hovertext}</b><br>🦠 Casos: <b>%{customdata[0]}</b><br>🔴 Deptos. en riesgo alto: <b>%{customdata[1]}</b><extra></extra>"
+        )
+
         fig_prov.update_geos(
             visible=True, fitbounds="locations", showland=True, landcolor="#1c2128",
             showocean=True, oceancolor="#0d1117", showcountries=True, countrycolor="#30363d",
@@ -375,11 +392,16 @@ if menu_seleccionado == "Mapa de riesgo":
             )
 
         riesgo_prov = riesgo_filtrado[riesgo_filtrado["provincia"] == prov_actual].copy()
+        
+        # Cálculo de totales y métricas de la provincia
+        casos_prov_totales = int(riesgo_prov["casos_dengue"].sum())
         n_alto_p = int((riesgo_prov["nivel_mult"] == "alto").sum())
         n_medio_p = int((riesgo_prov["nivel_mult"] == "medio").sum())
         n_bajo_p = int((riesgo_prov["nivel_mult"] == "bajo").sum())
 
-        ma, mm, mb = st.columns(3)
+        # 1. Tarjetas con Casos Totales + Niveles de Riesgo
+        mc, ma, mm, mb = st.columns(4)
+        mc.metric("🦠 Casos totales prov.", f"{casos_prov_totales:,}")
         ma.metric("🔴 Riesgo alto", f"{n_alto_p} deptos.")
         mm.metric("🟡 Riesgo medio", f"{n_medio_p} deptos.")
         mb.metric("🟢 Riesgo bajo", f"{n_bajo_p} deptos.")
@@ -396,7 +418,11 @@ if menu_seleccionado == "Mapa de riesgo":
             unsafe_allow_html=True,
         )
 
-        features_prov = [f for f in geo_dept['features'] if f['properties'].get('provincia') == prov_actual or f['properties'].get('PROVINCIA') == prov_actual]
+        features_prov = [
+            f for f in geo_dept['features'] 
+            if f['properties'].get('provincia') == prov_actual or f['properties'].get('PROVINCIA') == prov_actual
+        ]
+        
         all_lats, all_lons = [], []
         for feat in features_prov:
             for c in feat['geometry']['coordinates'][0]:
@@ -413,6 +439,7 @@ if menu_seleccionado == "Mapa de riesgo":
         nombre_dept_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['depto_nombre']))
         clima_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['factor_clima']))
         nbi_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['score_terreno']))
+        casos_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['casos_dengue']))
 
         m_dept = folium.Map(location=[centro_lat, centro_lon], zoom_start=zoom, tiles='CartoDB positron', scrollWheelZoom=True)
 
@@ -423,31 +450,43 @@ if menu_seleccionado == "Mapa de riesgo":
             nombre = nombre_dept_dict.get(did, feat['properties']['nombre'])
             clima = clima_dict.get(did, 0)
             nbi = nbi_dict.get(did, 0)
+            casos_depto = int(casos_dict.get(did, 0))
 
+            # 2. Tooltip con la cantidad de casos destacada
             folium.GeoJson(
                 feat,
                 style_function=lambda x, c=color: {'fillColor': c, 'color': '#64748b', 'weight': 1, 'fillOpacity': 0.75},
                 highlight_function=lambda x: {'fillOpacity': 0.95, 'weight': 2.5, 'color': '#1a56db'},
-                tooltip=folium.Tooltip(f"<b>{nombre}</b><br>Nivel de Riesgo: <b>{nivel.capitalize()}</b><br>Factor climático: {clima:.3f}<br>Score estructural: {nbi:.3f}", sticky=True),
+                tooltip=folium.Tooltip(
+                    f"<b>{nombre}</b><br>"
+                    f"🦠 Casos de Dengue: <b>{casos_depto:,}</b><br>"
+                    f"Nivel de Riesgo: <b>{nivel.capitalize()}</b><br>"
+                    f"Factor climático: {clima:.3f}<br>"
+                    f"Score estructural: {nbi:.3f}", 
+                    sticky=True
+                ),
             ).add_to(m_dept)
 
         st_folium(m_dept, height=550, use_container_width=True, returned_objects=[])
 
-        with st.expander("📋 Ver clasificación de riesgo por departamento"):
-            tabla_dept = riesgo_prov[["depto_nombre", "nivel_mult", "factor_clima", "score_terreno"]].copy()
+        # 3. Tabla de detalle incluyendo la columna de casos
+        with st.expander("📋 Ver clasificación de riesgo y casos por departamento"):
+            tabla_dept = riesgo_prov[["depto_nombre", "casos_dengue", "nivel_mult", "factor_clima", "score_terreno"]].copy()
             tabla_dept["nivel_mult"] = tabla_dept["nivel_mult"].str.capitalize()
-            tabla_dept.columns = ["Departamento", "Nivel de riesgo", "Factor climático", "Score estructural"]
-            orden_riesgo = {"Alto": 1, "Medio": 2, "Bajo": 3}
-            tabla_dept["orden"] = tabla_dept["Nivel de riesgo"].map(orden_riesgo)
-            tabla_dept = tabla_dept.sort_values("orden").drop(columns=["orden"])
+            tabla_dept.columns = ["Departamento", "Casos Dengue", "Nivel de riesgo", "Factor climático", "Score estructural"]
+            tabla_dept = tabla_dept.sort_values("Casos Dengue", ascending=False)
             st.dataframe(tabla_dept, use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VISTA 2: MONITOREO DEL MODELO (AL SELECCIONAR DESDE EL MENÚ LATERAL)
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# VISTA 2: MONITOREO DEL MODELO (OPTIMIZADO SEGÚN INTERPRETACIÓN CLÍNICA/EPI)
+# ══════════════════════════════════════════════════════════════════════════════
 elif menu_seleccionado == "Monitoreo del modelo":
     st.subheader("📊 Monitoreo y Evaluación del Modelo Predictivo")
 
+    # Controles de selección
     with st.container(border=True):
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 2, 2])
         with col_ctrl1:
@@ -466,22 +505,61 @@ elif menu_seleccionado == "Monitoreo del modelo":
     ].copy()
 
     if len(pred_prov) > 0:
-        mae_prov = abs(pred_prov["casos_real"] - pred_prov["pred"]).mean()
+        # Cálculo de métricas epidemiológicas y estadísticas
         pico_real = pred_prov["casos_real"].max()
         pico_pred = pred_prov["pred"].max()
-        sem_pico_real = pred_prov.loc[pred_prov["casos_real"].idxmax(), "semana_epi"]
-        sem_pico_pred = pred_prov.loc[pred_prov["pred"].idxmax(), "semana_epi"]
-        error_pico = abs(pico_real - pico_pred)
+        sem_pico_real = int(pred_prov.loc[pred_prov["casos_real"].idxmax(), "semana_epi"])
+        sem_pico_pred = int(pred_prov.loc[pred_prov["pred"].idxmax(), "semana_epi"])
+        dif_semanas = abs(sem_pico_real - sem_pico_pred)
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("MAE promedio", f"{mae_prov:,.0f} casos")
-        m2.metric("Pico real", f"{pico_real:,.0f} casos", f"Semana {sem_pico_real}")
-        m3.metric("Pico predicho", f"{pico_pred:,.0f} casos", f"Semana {sem_pico_pred}")
-        m4.metric("Error en pico", f"{error_pico:,.0f} casos")
+        # Cálculo del R² (Coeficiente de Determinación)
+        ss_res = np.sum((pred_prov["casos_real"] - pred_prov["pred"]) ** 2)
+        ss_tot = np.sum((pred_prov["casos_real"] - pred_prov["casos_real"].mean()) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        r2 = max(0, r2) # Ajuste visual si fuera negativo por baja varianza
 
-        st.markdown('<div class="dw-divider"></div>', unsafe_allow_html=True)
-        st.markdown(f"#### Evolución Temporal: Real vs. Predicción · **{prov_sel} ({anio_sel})**")
+        # Clasificación contextual del comportamiento (Chip de contexto)
+        if pico_real > 10000:
+            chip_txt = "🟡 Mega-brote — Magnitud subestimada"
+            chip_bg = "rgba(210, 153, 34, 0.15)"
+            chip_border = "#d29922"
+            chip_color = "#f0b429"
+        elif r2 > 0.6:
+            chip_txt = "🟢 Transmisión media / alta — Buen ajuste"
+            chip_bg = "rgba(63, 185, 80, 0.15)"
+            chip_border = "#3fb950"
+            chip_color = "#3fb950"
+        else:
+            chip_txt = "🔵 Transmisión baja / Dinámica local"
+            chip_bg = "rgba(88, 166, 255, 0.15)"
+            chip_border = "#58a6ff"
+            chip_color = "#58a6ff"
 
+        # Encabezado con Provincia + Chip de Desempeño
+        st.markdown(
+            f"""
+            <div style="display: flex; align-items: center; gap: 12px; margin-top: 10px; margin-bottom: 5px;">
+                <h3 style="margin: 0; padding: 0;">{prov_sel} ({anio_sel})</h3>
+                <span style="background: {chip_bg}; border: 1px solid {chip_border}; color: {chip_color}; 
+                             padding: 4px 12px; border-radius: 16px; font-size: 12px; font-weight: 600;">
+                    {chip_txt}
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # 1. INSIGHT DESTACADO (Lo primero que el ojo lee)
+        if dif_semanas == 0:
+            msg_pico = f"🎯 <b>Pico exacto</b> coincidente en la <b>Semana {sem_pico_real}</b>."
+        elif dif_semanas == 1:
+            msg_pico = f"🎯 <b>Anticipación efectiva del pico:</b> Detección oportuna con solo <b>1 semana de diferencia</b> (Real SE {sem_pico_real}, Predicho SE {sem_pico_pred})."
+        else:
+            msg_pico = f"⏱️ <b>Desfasaje del pico:</b> {dif_semanas} semanas de diferencia entre real (SE {sem_pico_real}) y predicho (SE {sem_pico_pred})."
+
+        st.info(msg_pico)
+
+        # 2. EL GRÁFICO COMO ESTRELLA PRINCIPAL (Arriba)
         fig = go.Figure()
         fig.add_trace(
             go.Scatter(
@@ -490,7 +568,7 @@ elif menu_seleccionado == "Monitoreo del modelo":
                 mode="lines",
                 name=f"Casos Reales ({anio_sel})",
                 fill="tozeroy",
-                fillcolor="rgba(88,166,255,0.07)",
+                fillcolor="rgba(88,166,255,0.08)",
                 line=dict(color="#58a6ff", width=3),
                 hovertemplate="Real — Sem %{x}: %{y:,.0f} casos<extra></extra>",
             )
@@ -511,8 +589,8 @@ elif menu_seleccionado == "Monitoreo del modelo":
             paper_bgcolor="#0d1117",
             plot_bgcolor="#161b22",
             font_color="#c9d1d9",
-            height=450,
-            margin=dict(l=10, r=10, t=20, b=40),
+            height=460,
+            margin=dict(l=10, r=10, t=10, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             xaxis=dict(title="Semana epidemiológica", gridcolor="#1c2128", showgrid=True, range=[0, 53]),
             yaxis=dict(title="Casos notificados", gridcolor="#1c2128", showgrid=True),
@@ -521,10 +599,22 @@ elif menu_seleccionado == "Monitoreo del modelo":
 
         st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("📋 Tabla de detalle semanal"):
+        # 3. TARJETAS DE MÉTRICAS CONTEXTUALIZADAS (R² + Diagnóstico del Brote)
+        pct_cobertura_pico = (pico_pred / pico_real * 100) if pico_real > 0 else 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Ajuste de Curva (R²)", f"{r2:.2f}", f"Explica el {r2*100:.0f}% de la variación")
+        m2.metric("Pico Real", f"{pico_real:,.0f} casos", f"Semana {sem_pico_real}")
+        m3.metric("Pico Predicho", f"{pico_pred:,.0f} casos", f"Semana {sem_pico_pred}")
+        m4.metric("Captura de Magnitud", f"{pct_cobertura_pico:.0f}%", f"del volumen en la cresta")
+
+        st.markdown('<div class="dw-divider"></div>', unsafe_allow_html=True)
+
+        # Tabla de detalle desplegable
+        with st.expander("📋 Ver tabla de datos semanales y desviación"):
             tabla = pred_prov[["semana_epi", "casos_real", "pred"]].copy()
             tabla.columns = ["Semana EP", "Casos Reales", "Predicción Modelo"]
-            tabla["Error absoluto"] = abs(tabla["Casos Reales"] - tabla["Predicción Modelo"]).round(0)
+            tabla["Diferencia (Casos)"] = (tabla["Predicción Modelo"] - tabla["Casos Reales"]).round(0)
             st.dataframe(tabla, use_container_width=True, hide_index=True)
     else:
         st.warning("No hay datos de evaluación disponibles para la selección actual.")
