@@ -33,7 +33,26 @@ def cargar_datos():
 
 
 pred, hist, riesgo, geo_dept, geo_prov = cargar_datos()
+
+# ── LIMPIEZA DE DATOS Y AÑOS ─────────────────────────────────────────────────
+for df in [pred, hist, riesgo]:
+    if "anio" in df.columns:
+        df["anio"] = pd.to_numeric(df["anio"], errors="coerce").fillna(0).astype(int)
+
+ANIOS_DISPONIBLES = sorted(
+    [a for a in (set(pred["anio"]) | set(hist["anio"]) | set(riesgo["anio"])) if a > 2000],
+    reverse=True
+)
+
+if "casos_dengue" in riesgo.columns:
+    riesgo["casos_dengue"] = pd.to_numeric(riesgo["casos_dengue"], errors="coerce").fillna(0)
+if "casos_real" in pred.columns:
+    pred["casos_real"] = pd.to_numeric(pred["casos_real"], errors="coerce").fillna(0)
+
 PROVINCIAS = sorted(pred["provincia"].unique())
+
+# Tabla base de departamentos para proyecciones futuras
+deptos_base = riesgo[["depto_id_norm", "depto_nombre", "provincia", "score_terreno", "factor_clima"]].drop_duplicates(subset=["depto_id_norm"]).copy()
 
 # ── ESTILOS GLOBALES ──────────────────────────────────────────────────────────
 st.markdown(
@@ -45,7 +64,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 #MainMenu, footer { visibility: hidden; }
 header { visibility: visible !important; background: transparent !important; }
 
-/* Botón flotante al costado para abrir el menú */
 [data-testid="stSidebarCollapseButton"], [data-testid="stHeader"] button {
     visibility: visible !important;
     display: flex !important;
@@ -57,7 +75,6 @@ header { visibility: visible !important; background: transparent !important; }
 
 .block-container { padding-top: 1.5rem !important; padding-bottom: 1rem !important; }
 
-/* Header principal */
 .dw-header {
     background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
     border: 1px solid #30363d;
@@ -82,7 +99,6 @@ header { visibility: visible !important; background: transparent !important; }
     letter-spacing: 0.05em;
 }
 
-/* Cards */
 .cards-row { display: flex; gap: 10px; margin-bottom: 1rem; }
 .nc {
     flex: 1;
@@ -152,16 +168,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── CÁLCULO DE CARDS NACIONALES ───────────────────────────────────────────────
-ultimo_anio = riesgo["anio"].max()
-ultima_semana = riesgo[riesgo["anio"] == ultimo_anio]["semana"].max()
-datos_rec = riesgo[
-    (riesgo["anio"] == ultimo_anio) & (riesgo["semana"] == ultima_semana)
-]
-datos_ant = riesgo[
-    (riesgo["anio"] == ultimo_anio)
-    & (riesgo["semana"] == max(ultima_semana - 1, 1))
-]
+# ── CÁLCULO INTELIGENTE DE CARDS NACIONALES ──────────────────────────────────
+riesgo_con_casos = riesgo[riesgo["casos_dengue"] > 0]
+if not riesgo_con_casos.empty:
+    ultimo_anio = int(riesgo_con_casos["anio"].max())
+    ultima_semana = int(riesgo_con_casos[riesgo_con_casos["anio"] == ultimo_anio]["semana"].max())
+else:
+    ultimo_anio = int(riesgo["anio"].max())
+    ultima_semana = int(riesgo[riesgo["anio"] == ultimo_anio]["semana"].max())
+
+datos_rec = riesgo[(riesgo["anio"] == ultimo_anio) & (riesgo["semana"] == ultima_semana)]
+datos_ant = riesgo[(riesgo["anio"] == ultimo_anio) & (riesgo["semana"] == max(ultima_semana - 1, 1))]
 
 casos_rec = int(datos_rec["casos_dengue"].sum())
 casos_ant = int(datos_ant["casos_dengue"].sum())
@@ -169,7 +186,7 @@ variacion = casos_rec - casos_ant
 
 deptos_alto = int((datos_rec["nivel_mult"] == "alto").sum())
 prov_max = datos_rec.groupby("provincia")["casos_dengue"].sum()
-prov_top = prov_max.idxmax() if prov_max.max() > 0 else "Sin datos"
+prov_top = prov_max.idxmax() if (not prov_max.empty and prov_max.max() > 0) else "Sin datos"
 
 if deptos_alto > 150:
     alerta_txt, alerta_cls = "🔴 ALERTA", "nc-alert-rojo"
@@ -215,7 +232,6 @@ st.markdown(
 with st.sidebar:
     st.markdown("### 📌 Navegación")
     
-    # Menú lateral estilizado con las 2 secciones
     menu_seleccionado = option_menu(
         menu_title=None,
         options=["Mapa de riesgo", "Monitoreo del modelo"],
@@ -240,7 +256,7 @@ with st.sidebar:
     )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VISTA 1: MAPA DE RIESGO DEPARTAMENTAL
+# VISTA 1: MAPA DE RIESGO
 # ══════════════════════════════════════════════════════════════════════════════
 if menu_seleccionado == "Mapa de riesgo":
     if "provincia_seleccionada" not in st.session_state:
@@ -251,30 +267,76 @@ if menu_seleccionado == "Mapa de riesgo":
         with col_m1:
             anio_mapa = st.selectbox(
                 "📅 Año epidemiológico",
-                sorted(riesgo["anio"].unique(), reverse=True),
+                ANIOS_DISPONIBLES,
                 key="anio_mapa",
             )
         with col_m2:
-            semanas_disp = sorted(
-                riesgo[riesgo["anio"] == anio_mapa]["semana"].unique()
-            )
+            semanas_r = riesgo[riesgo["anio"] == anio_mapa]["semana"].dropna().unique()
+            semanas_p = pred[pred["anio"] == anio_mapa]["semana_epi"].dropna().unique()
+            semanas_disp = sorted(set(semanas_r) | set(semanas_p))
+
+            if len(semanas_disp) > 0:
+                min_sem = int(min(semanas_disp))
+                max_sem = int(max(semanas_disp))
+                def_sem = max_sem
+            else:
+                min_sem = 1
+                max_sem = 52
+                def_sem = 1
+
             semana_mapa = st.slider(
-                "⏱️ Semana epidemiológica (SE)",
-                min_value=int(min(semanas_disp)),
-                max_value=int(max(semanas_disp)),
-                value=int(max(semanas_disp)),
-                key="semana_mapa",
+                "📅 Semana Epidemiológica",
+                min_value=min_sem,
+                max_value=max_sem,
+                value=def_sem,
+                key="sem_mapa"
             )
 
+    # Filtrar datos o generar proyecciones
     riesgo_filtrado = riesgo[
         (riesgo["anio"] == anio_mapa) & (riesgo["semana"] == semana_mapa)
     ].copy()
+
+    es_proyeccion = False
+
+    if riesgo_filtrado.empty or riesgo_filtrado["casos_dengue"].sum() == 0:
+        pred_sem = pred[(pred["anio"] == anio_mapa) & (pred["semana_epi"] == semana_mapa)]
+        if pred_sem.empty:
+            pred_sem = pred[pred["anio"] == anio_mapa]
+        
+        if not pred_sem.empty:
+            es_proyeccion = True
+            prov_pred_map = pred_sem.groupby("provincia")["pred"].mean().to_dict()
+
+            df_proj = deptos_base.copy()
+            df_proj["anio"] = anio_mapa
+            df_proj["semana"] = semana_mapa
+            df_proj["pred_prov"] = df_proj["provincia"].map(prov_pred_map).fillna(0)
+
+            def_denom = df_proj.groupby("provincia")["score_terreno"].transform("sum").replace(0, 1)
+            df_proj["casos_dengue"] = np.round(df_proj["pred_prov"] * (df_proj["score_terreno"] / def_denom))
+
+            def clasificar_riesgo(row):
+                c = row["casos_dengue"]
+                sc = row["score_terreno"]
+                if c > 15 or (c > 3 and sc > 0.6):
+                    return "alto"
+                elif c > 1 or sc > 0.35:
+                    return "medio"
+                else:
+                    return "bajo"
+
+            df_proj["nivel_mult"] = df_proj.apply(clasificar_riesgo, axis=1)
+            riesgo_filtrado = df_proj
+
+    if es_proyeccion:
+        st.info(f"🔮 **Mapa de Proyección Predictiva ({anio_mapa})**: Estimación de riesgo basada en el modelo para la Semana {semana_mapa}.")
+
     riesgo_filtrado["depto_id_norm"] = riesgo_filtrado["depto_id_norm"].astype(int)
 
-    def seleccionar_provincia():
-        if st.session_state.prov_selector_mapa != "— Seleccioná una provincia —":
-            st.session_state.provincia_seleccionada = st.session_state.prov_selector_mapa
-
+    # ──────────────────────────────────────────────────────────────────────────
+    # VISTA NACIONAL EN FOLIUM (ESTÉTICA HOMOGÉNEA)
+    # ──────────────────────────────────────────────────────────────────────────
     if st.session_state.provincia_seleccionada is None:
         n_alto = int((riesgo_filtrado["nivel_mult"] == "alto").sum())
         n_medio = int((riesgo_filtrado["nivel_mult"] == "medio").sum())
@@ -295,14 +357,11 @@ if menu_seleccionado == "Mapa de riesgo":
             .reset_index()
         )
 
-        casos_prov["casos_log"] = np.log1p(casos_prov["casos_totales"])
-        max_log = casos_prov["casos_log"].max()
-
         st.markdown(
             """
         <div style="background: #161b22; padding: 12px 16px; border-radius: 10px; border: 1px solid #30363d; margin-top: 10px; margin-bottom: 10px;">
             <span style="font-size: 14px; color: #58a6ff; font-weight: 600;">🔎 Explorador Departamental</span>
-            <p style="font-size: 11px; color: #8b949e; margin: 2px 0 6px 0;">Selecciona una provincia para ver el mapa detallado de nivel de riesgo por departamento.</p>
+            <p style="font-size: 11px; color: #8b949e; margin: 2px 0 6px 0;">Hacé clic sobre una provincia en el mapa o seleccionala en el desplegable para hacer zoom en sus departamentos.</p>
         </div>
         """,
             unsafe_allow_html=True,
@@ -312,6 +371,10 @@ if menu_seleccionado == "Mapa de riesgo":
             p for p in sorted(casos_prov["provincia"].tolist()) if "Tierra del Fuego" not in p
         ]
 
+        def seleccionar_provincia():
+            if st.session_state.prov_selector_mapa != "— Seleccioná una provincia —":
+                st.session_state.provincia_seleccionada = st.session_state.prov_selector_mapa
+
         st.selectbox(
             "Seleccionar provincia:",
             ["— Seleccioná una provincia —"] + provincias_filtradas,
@@ -320,58 +383,90 @@ if menu_seleccionado == "Mapa de riesgo":
             label_visibility="collapsed",
         )
 
-        # Aseguramos el formateo de casos para el cartelito (hover)
-        casos_prov["Casos acumulados"] = casos_prov["casos_totales"].apply(lambda x: f"{int(x):,}")
-
-        fig_prov = px.choropleth(
-            casos_prov,
-            geojson=geo_prov,
-            locations="provincia",
-            featureidkey="properties.provincia",
-            color="casos_log",
-            color_continuous_scale=[
-                [0.0, "#1c2128"],
-                [0.15, "#1a3a2a"],
-                [0.35, "#3fb950"],
-                [0.60, "#d29922"],
-                [0.80, "#e85b30"],
-                [1.0, "#f85149"],
-            ],
-            range_color=[0, max_log if max_log > 0 else 1],
-            hover_name="provincia",
-            hover_data={
-                "Casos acumulados": True,
-                "deptos_alto": True,
-                "casos_log": False,
-                "casos_totales": False,
-                "provincia": False,
-            },
-            labels={
-                "deptos_alto": "Deptos. en riesgo alto",
-            },
-        )
-        
-        # Personalizamos el cartelito flotante al pasar el mouse
-        fig_prov.update_traces(
-            hovertemplate="<b>%{hovertext}</b><br>🦠 Casos: <b>%{customdata[0]}</b><br>🔴 Deptos. en riesgo alto: <b>%{customdata[1]}</b><extra></extra>"
+        st.markdown(
+            """
+        <div class="map-legend">
+            <span><span class="leg-dot" style="background:#16a34a"></span>Bajo</span>
+            <span><span class="leg-dot" style="background:#eab308"></span>Medio</span>
+            <span><span class="leg-dot" style="background:#f97316"></span>Alto</span>
+            <span><span class="leg-dot" style="background:#dc2626"></span>Muy Alto</span>
+            <span style="color:#30363d; margin-left:4px;">· hacé clic en cualquier provincia para ver departamentos</span>
+        </div>
+        """,
+            unsafe_allow_html=True,
         )
 
-        fig_prov.update_geos(
-            visible=True, fitbounds="locations", showland=True, landcolor="#1c2128",
-            showocean=True, oceancolor="#0d1117", showcountries=True, countrycolor="#30363d",
-            showcoastlines=False, bgcolor="#0d1117",
+        # Mapa Folium Argentina
+        m_nac = folium.Map(
+            location=[-38.416097, -63.616672],
+            zoom_start=4,
+            tiles='CartoDB positron',
+            scrollWheelZoom=True
         )
-        fig_prov.update_layout(
-            paper_bgcolor="#0d1117", plot_bgcolor="#0d1117", font_color="#c9d1d9",
-            margin=dict(l=0, r=0, t=10, b=0), height=620,
-            coloraxis_colorbar=dict(
-                title="Riesgo", tickfont=dict(color="#8b949e", size=10), thickness=12, len=0.6,
-                tickvals=[0, max_log * 0.33, max_log * 0.66, max_log] if max_log > 0 else [0, 1],
-                ticktext=["Bajo", "Medio-Bajo", "Medio-Alto", "Alto"] if max_log > 0 else ["0", "1"],
-            ),
-        )
-        st.plotly_chart(fig_prov, use_container_width=True)
 
+        casos_dict = dict(zip(casos_prov["provincia"], casos_prov["casos_totales"]))
+        alto_dict = dict(zip(casos_prov["provincia"], casos_prov["deptos_alto"]))
+        total_dict = dict(zip(casos_prov["provincia"], casos_prov["deptos_total"]))
+
+        max_casos = casos_prov["casos_totales"].max()
+
+        def get_prov_color(c):
+            if max_casos == 0 or c == 0:
+                return "#16a34a"
+            r = c / max_casos
+            if r < 0.15:
+                return "#22c55e"
+            elif r < 0.40:
+                return "#eab308"
+            elif r < 0.70:
+                return "#f97316"
+            else:
+                return "#dc2626"
+
+        for feat in geo_prov['features']:
+            prov_nombre = feat['properties'].get('provincia') or feat['properties'].get('PROVINCIA')
+            if not prov_nombre or prov_nombre not in provincias_filtradas:
+                continue
+
+            c_tot = int(casos_dict.get(prov_nombre, 0))
+            d_alto = int(alto_dict.get(prov_nombre, 0))
+            d_tot = int(total_dict.get(prov_nombre, 0))
+            color = get_prov_color(c_tot)
+
+            folium.GeoJson(
+                feat,
+                style_function=lambda x, c=color: {
+                    'fillColor': c,
+                    'color': '#64748b',
+                    'weight': 1.2,
+                    'fillOpacity': 0.75
+                },
+                highlight_function=lambda x: {
+                    'fillOpacity': 0.95,
+                    'weight': 2.5,
+                    'color': '#1a56db'
+                },
+                tooltip=folium.Tooltip(
+                    f"<b>{prov_nombre}</b><br>"
+                    f"🦠 Casos estimados: <b>{c_tot:,}</b><br>"
+                    f"🔴 Deptos. en riesgo alto: <b>{d_alto}</b> / {d_tot}",
+                    sticky=True
+                ),
+            ).add_to(m_nac)
+
+        map_output = st_folium(m_nac, height=580, use_container_width=True, key="folium_mapa_nacional")
+
+        # Clic directo en el mapa para ir a la provincia
+        if map_output and map_output.get("last_active_drawing"):
+            props = map_output["last_active_drawing"]["properties"]
+            clicked_prov = props.get("provincia") or props.get("PROVINCIA")
+            if clicked_prov and clicked_prov in provincias_filtradas and clicked_prov != st.session_state.provincia_seleccionada:
+                st.session_state.provincia_seleccionada = clicked_prov
+                st.rerun()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # VISTA PROVINCIAL EN FOLIUM (ZOOM DETALLADO)
+    # ──────────────────────────────────────────────────────────────────────────
     else:
         prov_actual = st.session_state.provincia_seleccionada
         col_back, col_bread = st.columns([1, 4])
@@ -393,25 +488,42 @@ if menu_seleccionado == "Mapa de riesgo":
 
         riesgo_prov = riesgo_filtrado[riesgo_filtrado["provincia"] == prov_actual].copy()
         
-        # Cálculo de totales y métricas de la provincia
-        casos_prov_totales = int(riesgo_prov["casos_dengue"].sum())
+        # 1. Obtener casos de riesgo_prov o buscar directamente en pred si viene en 0
+        casos_prov_totales = int(riesgo_prov["casos_dengue"].sum()) if "casos_dengue" in riesgo_prov.columns else 0
+
+        if casos_prov_totales == 0:
+            pred_prov_val = pred[
+                (pred["provincia"] == prov_actual) & 
+                (pred["anio"] == anio_mapa) & 
+                (pred["semana_epi"] == semana_mapa)
+            ]
+            if not pred_prov_val.empty and "pred" in pred_prov_val.columns:
+                casos_prov_totales = int(pred_prov_val["pred"].sum())
+
+        # 2. Conteo de departamentos por nivel de riesgo
         n_alto_p = int((riesgo_prov["nivel_mult"] == "alto").sum())
         n_medio_p = int((riesgo_prov["nivel_mult"] == "medio").sum())
         n_bajo_p = int((riesgo_prov["nivel_mult"] == "bajo").sum())
 
-        # 1. Tarjetas con Casos Totales + Niveles de Riesgo
-        mc, ma, mm, mb = st.columns(4)
-        mc.metric("🦠 Casos totales prov.", f"{casos_prov_totales:,}")
-        ma.metric("🔴 Riesgo alto", f"{n_alto_p} deptos.")
-        mm.metric("🟡 Riesgo medio", f"{n_medio_p} deptos.")
-        mb.metric("🟢 Riesgo bajo", f"{n_bajo_p} deptos.")
+        # 3. Renderizado dinámico (4 columnas si hay casos > 0, 3 columnas si es 0)
+        if casos_prov_totales > 0:
+            mc, ma, mm, mb = st.columns(4)
+            mc.metric("🦠 Casos estimados prov.", f"{casos_prov_totales:,}")
+            ma.metric("🔴 Riesgo alto", f"{n_alto_p} deptos.")
+            mm.metric("🟡 Riesgo medio", f"{n_medio_p} deptos.")
+            mb.metric("🟢 Riesgo bajo", f"{n_bajo_p} deptos.")
+        else:
+            ma, mm, mb = st.columns(3)
+            ma.metric("🔴 Riesgo alto", f"{n_alto_p} deptos.")
+            mm.metric("🟡 Riesgo medio", f"{n_medio_p} deptos.")
+            mb.metric("🟢 Riesgo bajo", f"{n_bajo_p} deptos.")
 
         st.markdown(
             """
         <div class="map-legend">
-            <span><span class="leg-dot" style="background:#3fb950"></span>Riesgo bajo</span>
-            <span><span class="leg-dot" style="background:#d29922"></span>Riesgo medio</span>
-            <span><span class="leg-dot" style="background:#f85149"></span>Riesgo alto</span>
+            <span><span class="leg-dot" style="background:#16a34a"></span>Riesgo bajo</span>
+            <span><span class="leg-dot" style="background:#d97706"></span>Riesgo medio</span>
+            <span><span class="leg-dot" style="background:#dc2626"></span>Riesgo alto</span>
             <span style="color:#30363d; margin-left:4px;">· basado en índice climático + estructural</span>
         </div>
         """,
@@ -439,7 +551,6 @@ if menu_seleccionado == "Mapa de riesgo":
         nombre_dept_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['depto_nombre']))
         clima_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['factor_clima']))
         nbi_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['score_terreno']))
-        casos_dict = dict(zip(riesgo_prov['depto_id_norm'].astype(str), riesgo_prov['casos_dengue']))
 
         m_dept = folium.Map(location=[centro_lat, centro_lon], zoom_start=zoom, tiles='CartoDB positron', scrollWheelZoom=True)
 
@@ -450,16 +561,13 @@ if menu_seleccionado == "Mapa de riesgo":
             nombre = nombre_dept_dict.get(did, feat['properties']['nombre'])
             clima = clima_dict.get(did, 0)
             nbi = nbi_dict.get(did, 0)
-            casos_depto = int(casos_dict.get(did, 0))
 
-            # 2. Tooltip con la cantidad de casos destacada
             folium.GeoJson(
                 feat,
                 style_function=lambda x, c=color: {'fillColor': c, 'color': '#64748b', 'weight': 1, 'fillOpacity': 0.75},
                 highlight_function=lambda x: {'fillOpacity': 0.95, 'weight': 2.5, 'color': '#1a56db'},
                 tooltip=folium.Tooltip(
                     f"<b>{nombre}</b><br>"
-                    f"🦠 Casos de Dengue: <b>{casos_depto:,}</b><br>"
                     f"Nivel de Riesgo: <b>{nivel.capitalize()}</b><br>"
                     f"Factor climático: {clima:.3f}<br>"
                     f"Score estructural: {nbi:.3f}", 
@@ -469,24 +577,21 @@ if menu_seleccionado == "Mapa de riesgo":
 
         st_folium(m_dept, height=550, use_container_width=True, returned_objects=[])
 
-        # 3. Tabla de detalle incluyendo la columna de casos
-        with st.expander("📋 Ver clasificación de riesgo y casos por departamento"):
-            tabla_dept = riesgo_prov[["depto_nombre", "casos_dengue", "nivel_mult", "factor_clima", "score_terreno"]].copy()
+        with st.expander("📋 Ver clasificación de riesgo por departamento"):
+            tabla_dept = riesgo_prov[["depto_nombre", "nivel_mult", "factor_clima", "score_terreno"]].copy()
             tabla_dept["nivel_mult"] = tabla_dept["nivel_mult"].str.capitalize()
-            tabla_dept.columns = ["Departamento", "Casos Dengue", "Nivel de riesgo", "Factor climático", "Score estructural"]
-            tabla_dept = tabla_dept.sort_values("Casos Dengue", ascending=False)
+            tabla_dept.columns = ["Departamento", "Nivel de riesgo", "Factor climático", "Score estructural"]
+            tabla_dept = tabla_dept.sort_values("Departamento")
             st.dataframe(tabla_dept, use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VISTA 2: MONITOREO DEL MODELO (AL SELECCIONAR DESDE EL MENÚ LATERAL)
-# ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-# VISTA 2: MONITOREO DEL MODELO (OPTIMIZADO SEGÚN INTERPRETACIÓN CLÍNICA/EPI)
+# VISTA 2: MONITOREO DEL MODELO
 # ══════════════════════════════════════════════════════════════════════════════
 elif menu_seleccionado == "Monitoreo del modelo":
     st.subheader("📊 Monitoreo y Evaluación del Modelo Predictivo")
 
-    # Controles de selección
+    anios_pred = ANIOS_DISPONIBLES
+
     with st.container(border=True):
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 2, 2])
         with col_ctrl1:
@@ -494,7 +599,7 @@ elif menu_seleccionado == "Monitoreo del modelo":
         with col_ctrl2:
             horizonte_sel = st.radio("Horizonte de predicción", ["t+2 (2 semanas)", "t+4 (4 semanas)"], horizontal=True, key="horiz_pred_sel")
         with col_ctrl3:
-            anio_sel = st.radio("Año de evaluación", [2024, 2025], horizontal=True, key="anio_pred_sel")
+            anio_sel = st.selectbox("Año de predicción", anios_pred, index=0, key="anio_pred_sel")
 
     horizonte_key = "t+2" if "t+2" in horizonte_sel else "t+4"
 
@@ -504,38 +609,65 @@ elif menu_seleccionado == "Monitoreo del modelo":
         & (pred["anio"] == anio_sel)
     ].copy()
 
+    pico_real = "N/A"
+    pico_pred = "N/A"
+    sem_pico_real = None
+    sem_pico_pred = None
+    dif_semanas = "N/A"
+    r2 = "N/A"
+    has_real = False
+    has_pred = False
+
     if len(pred_prov) > 0:
-        # Cálculo de métricas epidemiológicas y estadísticas
-        pico_real = pred_prov["casos_real"].max()
-        pico_pred = pred_prov["pred"].max()
-        sem_pico_real = int(pred_prov.loc[pred_prov["casos_real"].idxmax(), "semana_epi"])
-        sem_pico_pred = int(pred_prov.loc[pred_prov["pred"].idxmax(), "semana_epi"])
-        dif_semanas = abs(sem_pico_real - sem_pico_pred)
+        has_real = pred_prov["casos_real"].notna().any() and not np.isnan(pred_prov["casos_real"].max())
+        has_pred = pred_prov["pred"].notna().any() and not np.isnan(pred_prov["pred"].max())
 
-        # Cálculo del R² (Coeficiente de Determinación)
-        ss_res = np.sum((pred_prov["casos_real"] - pred_prov["pred"]) ** 2)
-        ss_tot = np.sum((pred_prov["casos_real"] - pred_prov["casos_real"].mean()) ** 2)
-        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-        r2 = max(0, r2) # Ajuste visual si fuera negativo por baja varianza
+        if has_real:
+            pico_real = pred_prov["casos_real"].max()
+            sem_pico_real = int(pred_prov.loc[pred_prov["casos_real"].idxmax(), "semana_epi"])
 
-        # Clasificación contextual del comportamiento (Chip de contexto)
-        if pico_real > 10000:
+        if has_pred:
+            pico_pred = pred_prov["pred"].max()
+            sem_pico_pred = int(pred_prov.loc[pred_prov["pred"].idxmax(), "semana_epi"])
+
+        if sem_pico_real is not None and sem_pico_pred is not None:
+            dif_semanas = abs(sem_pico_real - sem_pico_pred)
+
+        if has_real and has_pred:
+            valid_mask = pred_prov["casos_real"].notna() & pred_prov["pred"].notna()
+            real_valid = pred_prov.loc[valid_mask, "casos_real"]
+            pred_valid = pred_prov.loc[valid_mask, "pred"]
+            
+            if len(real_valid) > 0:
+                ss_res = np.sum((real_valid - pred_valid) ** 2)
+                ss_tot = np.sum((real_valid - real_valid.mean()) ** 2)
+                r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                r2 = max(0, r2)
+
+        is_mega_brote = isinstance(pico_real, (int, float)) and pico_real > 10000
+        has_good_r2 = isinstance(r2, (int, float)) and r2 > 0.6
+
+        if is_mega_brote:
             chip_txt = "🟡 Mega-brote — Magnitud subestimada"
             chip_bg = "rgba(210, 153, 34, 0.15)"
             chip_border = "#d29922"
             chip_color = "#f0b429"
-        elif r2 > 0.6:
+        elif has_good_r2:
             chip_txt = "🟢 Transmisión media / alta — Buen ajuste"
             chip_bg = "rgba(63, 185, 80, 0.15)"
             chip_border = "#3fb950"
             chip_color = "#3fb950"
+        elif has_pred and not has_real:
+            chip_txt = "🔮 Proyección Futura — Alerta Temprana"
+            chip_bg = "rgba(163, 113, 247, 0.15)"
+            chip_border = "#a371f7"
+            chip_color = "#d2a8ff"
         else:
             chip_txt = "🔵 Transmisión baja / Dinámica local"
             chip_bg = "rgba(88, 166, 255, 0.15)"
             chip_border = "#58a6ff"
             chip_color = "#58a6ff"
 
-        # Encabezado con Provincia + Chip de Desempeño
         st.markdown(
             f"""
             <div style="display: flex; align-items: center; gap: 12px; margin-top: 10px; margin-bottom: 5px;">
@@ -549,41 +681,43 @@ elif menu_seleccionado == "Monitoreo del modelo":
             unsafe_allow_html=True
         )
 
-        # 1. INSIGHT DESTACADO (Lo primero que el ojo lee)
-        if dif_semanas == 0:
-            msg_pico = f"🎯 <b>Pico exacto</b> coincidente en la <b>Semana {sem_pico_real}</b>."
-        elif dif_semanas == 1:
-            msg_pico = f"🎯 <b>Anticipación efectiva del pico:</b> Detección oportuna con solo <b>1 semana de diferencia</b> (Real SE {sem_pico_real}, Predicho SE {sem_pico_pred})."
-        else:
-            msg_pico = f"⏱️ <b>Desfasaje del pico:</b> {dif_semanas} semanas de diferencia entre real (SE {sem_pico_real}) y predicho (SE {sem_pico_pred})."
+        if isinstance(dif_semanas, (int, float)):
+            if dif_semanas == 0:
+                msg_pico = f"🎯 <b>Pico exacto</b> coincidente en la <b>Semana {sem_pico_real}</b>."
+            elif dif_semanas == 1:
+                msg_pico = f"🎯 <b>Anticipación efectiva del pico:</b> Detección oportuna con solo <b>1 semana de diferencia</b> (Real SE {sem_pico_real}, Predicho SE {sem_pico_pred})."
+            else:
+                msg_pico = f"⏱️ <b>Desfasaje del pico:</b> {int(dif_semanas)} semanas de diferencia entre real (SE {sem_pico_real}) y predicho (SE {sem_pico_pred})."
+            st.info(msg_pico)
+        elif has_pred and not has_real:
+            st.info(f"🔮 <b>Proyección epidemiológica para {anio_sel}:</b> Modelo activo sin registros reales de contraste.")
 
-        st.info(msg_pico)
-
-        # 2. EL GRÁFICO COMO ESTRELLA PRINCIPAL (Arriba)
         fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=pred_prov["semana_epi"],
-                y=pred_prov["casos_real"],
-                mode="lines",
-                name=f"Casos Reales ({anio_sel})",
-                fill="tozeroy",
-                fillcolor="rgba(88,166,255,0.08)",
-                line=dict(color="#58a6ff", width=3),
-                hovertemplate="Real — Sem %{x}: %{y:,.0f} casos<extra></extra>",
+        if has_real:
+            fig.add_trace(
+                go.Scatter(
+                    x=pred_prov["semana_epi"],
+                    y=pred_prov["casos_real"],
+                    mode="lines",
+                    name=f"Casos Reales ({anio_sel})",
+                    fill="tozeroy",
+                    fillcolor="rgba(88,166,255,0.08)",
+                    line=dict(color="#58a6ff", width=3),
+                    hovertemplate="Real — Sem %{x}: %{y:,.0f} casos<extra></extra>",
+                )
             )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=pred_prov["semana_epi"],
-                y=pred_prov["pred"],
-                mode="lines+markers",
-                name=f"Predicción ({horizonte_key})",
-                line=dict(color="#f85149", width=2.5, dash="dash"),
-                marker=dict(size=5, symbol="diamond", color="#f85149"),
-                hovertemplate="Predicción — Sem %{x}: %{y:,.0f} casos<extra></extra>",
+        if has_pred:
+            fig.add_trace(
+                go.Scatter(
+                    x=pred_prov["semana_epi"],
+                    y=pred_prov["pred"],
+                    mode="lines+markers",
+                    name=f"Predicción ({horizonte_key})",
+                    line=dict(color="#f85149", width=2.5, dash="dash"),
+                    marker=dict(size=5, symbol="diamond", color="#f85149"),
+                    hovertemplate="Predicción — Sem %{x}: %{y:,.0f} casos<extra></extra>",
+                )
             )
-        )
 
         fig.update_layout(
             paper_bgcolor="#0d1117",
@@ -599,22 +733,38 @@ elif menu_seleccionado == "Monitoreo del modelo":
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # 3. TARJETAS DE MÉTRICAS CONTEXTUALIZADAS (R² + Diagnóstico del Brote)
-        pct_cobertura_pico = (pico_pred / pico_real * 100) if pico_real > 0 else 0
+        if isinstance(r2, (int, float)):
+            str_r2 = f"{r2:.2f}"
+            sub_r2 = f"Explica el {r2 * 100:.0f}% de la variación"
+        else:
+            str_r2 = "N/A"
+            sub_r2 = "Sin datos de comparación"
+
+        if isinstance(pico_real, (int, float)) and pico_real > 0:
+            str_pico_real = f"{int(pico_real):,} casos"
+            sub_pico_real = f"Semana {int(sem_pico_real)}" if isinstance(sem_pico_real, (int, float)) else "Sin semana"
+        else:
+            str_pico_real = "Sin registros"
+            sub_pico_real = "N/A"
+
+        if isinstance(pico_pred, (int, float)) and pico_pred > 0:
+            str_pico_pred = f"{int(pico_pred):,} casos"
+            sub_pico_pred = f"Semana {int(sem_pico_pred)}" if isinstance(sem_pico_pred, (int, float)) else "Sin semana"
+        else:
+            str_pico_pred = "N/A"
+            sub_pico_pred = "Sin registros"
+
+        if isinstance(dif_semanas, (int, float)):
+            str_dif = f"{int(dif_semanas)} sem"
+            sub_dif = "Desfasaje entre picos"
+        else:
+            str_dif = "N/A"
+            sub_dif = "Sin comparación"
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Ajuste de Curva (R²)", f"{r2:.2f}", f"Explica el {r2*100:.0f}% de la variación")
-        m2.metric("Pico Real", f"{pico_real:,.0f} casos", f"Semana {sem_pico_real}")
-        m3.metric("Pico Predicho", f"{pico_pred:,.0f} casos", f"Semana {sem_pico_pred}")
-        m4.metric("Captura de Magnitud", f"{pct_cobertura_pico:.0f}%", f"del volumen en la cresta")
-
-        st.markdown('<div class="dw-divider"></div>', unsafe_allow_html=True)
-
-        # Tabla de detalle desplegable
-        with st.expander("📋 Ver tabla de datos semanales y desviación"):
-            tabla = pred_prov[["semana_epi", "casos_real", "pred"]].copy()
-            tabla.columns = ["Semana EP", "Casos Reales", "Predicción Modelo"]
-            tabla["Diferencia (Casos)"] = (tabla["Predicción Modelo"] - tabla["Casos Reales"]).round(0)
-            st.dataframe(tabla, use_container_width=True, hide_index=True)
+        m1.metric("Ajuste de Curva (R²)", str_r2, sub_r2)
+        m2.metric("Pico Real", str_pico_real, sub_pico_real)
+        m3.metric("Pico Predicho", str_pico_pred, sub_pico_pred)
+        m4.metric("Diferencia de Picos", str_dif, sub_dif)
     else:
-        st.warning("No hay datos de evaluación disponibles para la selección actual.")
+        st.warning(f"No hay registros o predicciones disponibles para {prov_sel} en el año {anio_sel}.")
