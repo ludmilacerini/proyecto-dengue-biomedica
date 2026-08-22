@@ -16,6 +16,17 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# ── FUNCIONES DE NORMALIZACIÓN ────────────────────────────────────────────────
+def normalizar_provincia(nombre):
+    if not nombre or pd.isna(nombre):
+        return ""
+    n = str(nombre).strip()
+    if "tierra del fuego" in n.lower():
+        return "Tierra del Fuego"
+    if "ciudad aut" in n.lower() or "caba" in n.lower() or "capital federal" in n.lower():
+        return "CABA"
+    return n
+
 # ── CARGA DE DATOS CON CACHE ───────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def cargar_datos():
@@ -34,10 +45,12 @@ def cargar_datos():
 
 pred, hist, riesgo, geo_dept, geo_prov = cargar_datos()
 
-# ── LIMPIEZA DE DATOS Y AÑOS ─────────────────────────────────────────────────
+# ── LIMPIEZA DE DATOS Y HOMOGENEIZACIÓN DE NOMBRES ───────────────────────────
 for df in [pred, hist, riesgo]:
     if "anio" in df.columns:
         df["anio"] = pd.to_numeric(df["anio"], errors="coerce").fillna(0).astype(int)
+    if "provincia" in df.columns:
+        df["provincia"] = df["provincia"].apply(normalizar_provincia)
 
 ANIOS_DISPONIBLES = sorted(
     [a for a in (set(pred["anio"]) | set(hist["anio"]) | set(riesgo["anio"])) if a > 2000],
@@ -49,7 +62,7 @@ if "casos_dengue" in riesgo.columns:
 if "casos_real" in pred.columns:
     pred["casos_real"] = pd.to_numeric(pred["casos_real"], errors="coerce").fillna(0)
 
-PROVINCIAS = sorted(pred["provincia"].unique())
+PROVINCIAS = sorted([p for p in pred["provincia"].unique() if p])
 
 # Tabla base de departamentos para proyecciones futuras
 deptos_base = riesgo[["depto_id_norm", "depto_nombre", "provincia", "score_terreno", "factor_clima"]].drop_duplicates(subset=["depto_id_norm"]).copy()
@@ -128,6 +141,13 @@ header { visibility: visible !important; background: transparent !important; }
     margin: 6px 0 10px;
     align-items: center;
 }
+.leg-gradient {
+    width: 120px;
+    height: 10px;
+    border-radius: 5px;
+    background: linear-gradient(to right, #16a34a, #eab308, #f97316, #dc2626);
+    display: inline-block;
+}
 .leg-dot {
     width: 10px; height: 10px;
     border-radius: 50%;
@@ -163,64 +183,6 @@ st.markdown(
         </div>
     </div>
     <span class="dw-badge">● SISTEMA ACTIVO</span>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# ── CÁLCULO INTELIGENTE DE CARDS NACIONALES ──────────────────────────────────
-riesgo_con_casos = riesgo[riesgo["casos_dengue"] > 0]
-if not riesgo_con_casos.empty:
-    ultimo_anio = int(riesgo_con_casos["anio"].max())
-    ultima_semana = int(riesgo_con_casos[riesgo_con_casos["anio"] == ultimo_anio]["semana"].max())
-else:
-    ultimo_anio = int(riesgo["anio"].max())
-    ultima_semana = int(riesgo[riesgo["anio"] == ultimo_anio]["semana"].max())
-
-datos_rec = riesgo[(riesgo["anio"] == ultimo_anio) & (riesgo["semana"] == ultima_semana)]
-datos_ant = riesgo[(riesgo["anio"] == ultimo_anio) & (riesgo["semana"] == max(ultima_semana - 1, 1))]
-
-casos_rec = int(datos_rec["casos_dengue"].sum())
-casos_ant = int(datos_ant["casos_dengue"].sum())
-variacion = casos_rec - casos_ant
-
-deptos_alto = int((datos_rec["nivel_mult"] == "alto").sum())
-prov_max = datos_rec.groupby("provincia")["casos_dengue"].sum()
-prov_top = prov_max.idxmax() if (not prov_max.empty and prov_max.max() > 0) else "Sin datos"
-
-if deptos_alto > 150:
-    alerta_txt, alerta_cls = "🔴 ALERTA", "nc-alert-rojo"
-elif deptos_alto > 80:
-    alerta_txt, alerta_cls = "🟡 ATENCIÓN", "nc-alert-amarillo"
-else:
-    alerta_txt, alerta_cls = "🟢 NORMAL", "nc-alert-verde"
-
-var_cls = "nc-up" if variacion > 0 else "nc-down"
-var_icon = "▲" if variacion > 0 else "▼"
-
-st.markdown(
-    f"""
-<div class="cards-row">
-  <div class="nc">
-    <div class="nc-label">Casos esta semana</div>
-    <div class="nc-val">{casos_rec:,}</div>
-    <div class="nc-sub {var_cls}">{var_icon} {abs(variacion):,} vs semana anterior</div>
-  </div>
-  <div class="nc">
-    <div class="nc-label">Departamentos en alerta</div>
-    <div class="nc-val nc-alert-rojo">{deptos_alto}</div>
-    <div class="nc-sub">de 527 departamentos</div>
-  </div>
-  <div class="nc">
-    <div class="nc-label">Provincia más afectada</div>
-    <div class="nc-val-sm">{prov_top}</div>
-    <div class="nc-sub">Semana {ultima_semana} / {ultimo_anio}</div>
-  </div>
-  <div class="nc">
-    <div class="nc-label">Estado del sistema</div>
-    <div class="nc-val-sm {alerta_cls}">{alerta_txt}</div>
-    <div class="nc-sub">{deptos_alto} deptos. en riesgo alto</div>
-  </div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -262,6 +224,7 @@ if menu_seleccionado == "Mapa de riesgo":
     if "provincia_seleccionada" not in st.session_state:
         st.session_state.provincia_seleccionada = None
 
+    # Controles de tiempo (Año y Semana)
     with st.container(border=True):
         col_m1, col_m2 = st.columns([1, 3])
         with col_m1:
@@ -271,8 +234,8 @@ if menu_seleccionado == "Mapa de riesgo":
                 key="anio_mapa",
             )
         with col_m2:
-            semanas_r = riesgo[riesgo["anio"] == anio_mapa]["semana"].dropna().unique()
-            semanas_p = pred[pred["anio"] == anio_mapa]["semana_epi"].dropna().unique()
+            semanas_r = riesgo[riesgo["anio"] == anio_mapa]["semana"].dropna().unique() if "semana" in riesgo.columns else []
+            semanas_p = pred[pred["anio"] == anio_mapa]["semana_epi"].dropna().unique() if "semana_epi" in pred.columns else []
             semanas_disp = sorted(set(semanas_r) | set(semanas_p))
 
             if len(semanas_disp) > 0:
@@ -293,8 +256,9 @@ if menu_seleccionado == "Mapa de riesgo":
             )
 
     # Filtrar datos o generar proyecciones
+    col_semana = "semana" if "semana" in riesgo.columns else "semana_epi"
     riesgo_filtrado = riesgo[
-        (riesgo["anio"] == anio_mapa) & (riesgo["semana"] == semana_mapa)
+        (riesgo["anio"] == anio_mapa) & (riesgo[col_semana] == semana_mapa)
     ].copy()
 
     es_proyeccion = False
@@ -310,7 +274,7 @@ if menu_seleccionado == "Mapa de riesgo":
 
             df_proj = deptos_base.copy()
             df_proj["anio"] = anio_mapa
-            df_proj["semana"] = semana_mapa
+            df_proj[col_semana] = semana_mapa
             df_proj["pred_prov"] = df_proj["provincia"].map(prov_pred_map).fillna(0)
 
             def_denom = df_proj.groupby("provincia")["score_terreno"].transform("sum").replace(0, 1)
@@ -329,29 +293,62 @@ if menu_seleccionado == "Mapa de riesgo":
             df_proj["nivel_mult"] = df_proj.apply(clasificar_riesgo, axis=1)
             riesgo_filtrado = df_proj
 
+    # ── CÁLCULO DINÁMICO DE TARJETAS SUPERIORES (KPIs) ──────────────────────────
+    deptos_alerta_semana = int((riesgo_filtrado["nivel_mult"].astype(str).str.lower() == "alto").sum())
+    deptos_medio_semana = int((riesgo_filtrado["nivel_mult"].astype(str).str.lower() == "medio").sum())
+    casos_totales_semana = int(riesgo_filtrado["casos_dengue"].sum()) if "casos_dengue" in riesgo_filtrado.columns else 0
+
+    if deptos_alerta_semana >= 10:
+        alerta_txt, alerta_cls = "🔴 ALERTA CRÍTICA", "nc-alert-rojo"
+    elif deptos_alerta_semana >= 1:
+        alerta_txt, alerta_cls = "🟡 ATENCIÓN", "nc-alert-amarillo"
+    else:
+        alerta_txt, alerta_cls = "🟢 NORMAL", "nc-alert-verde"
+
+    st.markdown(
+        f"""
+    <div class="cards-row">
+      <div class="nc">
+        <div class="nc-label">Estado del sistema</div>
+        <div class="nc-val-sm {alerta_cls}">{alerta_txt}</div>
+        <div class="nc-sub">{deptos_alerta_semana} deptos. en riesgo alto</div>
+      </div>
+      <div class="nc">
+        <div class="nc-label">Casos esta semana</div>
+        <div class="nc-val">{casos_totales_semana:,}</div>
+        <div class="nc-sub">Semana {semana_mapa} / {anio_mapa}</div>
+      </div>
+      <div class="nc">
+        <div class="nc-label">Deptos. en Riesgo Alto</div>
+        <div class="nc-val nc-alert-rojo">{deptos_alerta_semana}</div>
+        <div class="nc-sub">de 527 departamentos</div>
+      </div>
+      <div class="nc">
+        <div class="nc-label">Deptos. en Riesgo Medio</div>
+        <div class="nc-val nc-alert-amarillo">{deptos_medio_semana}</div>
+        <div class="nc-sub">Semana {semana_mapa} / {anio_mapa}</div>
+      </div>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
     if es_proyeccion:
         st.info(f"🔮 **Mapa de Proyección Predictiva ({anio_mapa})**: Estimación de riesgo basada en el modelo para la Semana {semana_mapa}.")
 
     riesgo_filtrado["depto_id_norm"] = riesgo_filtrado["depto_id_norm"].astype(int)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # VISTA NACIONAL EN FOLIUM (ESTÉTICA HOMOGÉNEA)
+    # VISTA NACIONAL EN FOLIUM (MAPA DE CALOR POR MAYORÍA DE DEPARTAMENTOS)
     # ──────────────────────────────────────────────────────────────────────────
     if st.session_state.provincia_seleccionada is None:
-        n_alto = int((riesgo_filtrado["nivel_mult"] == "alto").sum())
-        n_medio = int((riesgo_filtrado["nivel_mult"] == "medio").sum())
-        n_bajo = int((riesgo_filtrado["nivel_mult"] == "bajo").sum())
-
-        ma, mm, mb = st.columns(3)
-        ma.metric("🔴 Riesgo alto", f"{n_alto} deptos.")
-        mm.metric("🟡 Riesgo medio", f"{n_medio} deptos.")
-        mb.metric("🟢 Riesgo bajo", f"{n_bajo} deptos.")
-
         casos_prov = (
             riesgo_filtrado.groupby("provincia")
             .agg(
                 casos_totales=("casos_dengue", "sum"),
-                deptos_alto=("nivel_mult", lambda x: (x == "alto").sum()),
+                deptos_alto=("nivel_mult", lambda x: (x.astype(str).str.lower() == "alto").sum()),
+                deptos_medio=("nivel_mult", lambda x: (x.astype(str).str.lower() == "medio").sum()),
+                deptos_bajo=("nivel_mult", lambda x: (x.astype(str).str.lower() == "bajo").sum()),
                 deptos_total=("depto_id_norm", "count"),
             )
             .reset_index()
@@ -367,9 +364,7 @@ if menu_seleccionado == "Mapa de riesgo":
             unsafe_allow_html=True,
         )
 
-        provincias_filtradas = [
-            p for p in sorted(casos_prov["provincia"].tolist()) if "Tierra del Fuego" not in p
-        ]
+        provincias_filtradas = sorted([p for p in casos_prov["provincia"].tolist() if p])
 
         def seleccionar_provincia():
             if st.session_state.prov_selector_mapa != "— Seleccioná una provincia —":
@@ -386,80 +381,130 @@ if menu_seleccionado == "Mapa de riesgo":
         st.markdown(
             """
         <div class="map-legend">
-            <span><span class="leg-dot" style="background:#16a34a"></span>Bajo</span>
-            <span><span class="leg-dot" style="background:#eab308"></span>Medio</span>
-            <span><span class="leg-dot" style="background:#f97316"></span>Alto</span>
-            <span><span class="leg-dot" style="background:#dc2626"></span>Muy Alto</span>
-            <span style="color:#30363d; margin-left:4px;">· hacé clic en cualquier provincia para ver departamentos</span>
+            <span>Mapa de Calor (Intensidad de Riesgo Provincial):</span>
+            <span><span class="leg-gradient"></span> Bajo ➔ Alto</span>
+            <span style="color:#30363d; margin-left:8px;">· basado en la ponderación de la mayoría de departamentos</span>
         </div>
         """,
             unsafe_allow_html=True,
         )
 
-        # Mapa Folium Argentina
+        # Mapa Folium Argentina (Ajustado para abarcar desde Jujuy hasta Tierra del Fuego)
         m_nac = folium.Map(
-            location=[-38.416097, -63.616672],
+            location=[-41.5, -65.0],
             zoom_start=4,
             tiles='CartoDB positron',
             scrollWheelZoom=True
         )
 
-        casos_dict = dict(zip(casos_prov["provincia"], casos_prov["casos_totales"]))
-        alto_dict = dict(zip(casos_prov["provincia"], casos_prov["deptos_alto"]))
-        total_dict = dict(zip(casos_prov["provincia"], casos_prov["deptos_total"]))
+        # Cálculo de Mapa de Calor / Ponderación provincial según mayoría de deptos
+        dict_score_provincial = {}
+        dict_detalles_provincial = {}
 
-        max_casos = casos_prov["casos_totales"].max()
+        for _, row in casos_prov.iterrows():
+            prov = row["provincia"]
+            n_tot = row["deptos_total"] if row["deptos_total"] > 0 else 1
+            score = (row["deptos_alto"] * 1.0 + row["deptos_medio"] * 0.4) / n_tot
+            dict_score_provincial[prov] = score
+            dict_detalles_provincial[prov] = {
+                "alto": int(row["deptos_alto"]),
+                "medio": int(row["deptos_medio"]),
+                "bajo": int(row["deptos_bajo"]),
+                "tot": int(row["deptos_total"]),
+            }
 
-        def get_prov_color(c):
-            if max_casos == 0 or c == 0:
-                return "#16a34a"
-            r = c / max_casos
-            if r < 0.15:
-                return "#22c55e"
-            elif r < 0.40:
-                return "#eab308"
-            elif r < 0.70:
-                return "#f97316"
+        def obtener_color_calor(score):
+            if score == 0:
+                return "#16a34a"  # Verde bajo
+            elif score < 0.15:
+                return "#22c55e"  # Verde claro
+            elif score < 0.35:
+                return "#eab308"  # Amarillo
+            elif score < 0.55:
+                return "#f97316"  # Naranja
+            elif score < 0.75:
+                return "#ef4444"  # Rojo
             else:
-                return "#dc2626"
+                return "#991b1b"  # Rojo oscuro intenso
+
+        # Casos reales vs estimados para Tooltips según el año
+        dict_casos_reales = {}
+        dict_casos_estimados = {}
+        pred_sem_act = pred[(pred["anio"] == anio_mapa) & (pred["semana_epi"] == semana_mapa)]
+        
+        for prov, group in riesgo_filtrado.groupby("provincia"):
+            c_dengue = int(group["casos_dengue"].sum()) if "casos_dengue" in group.columns else 0
+            dict_casos_reales[prov] = c_dengue
+            
+            p_val = pred_sem_act[pred_sem_act["provincia"] == prov]["pred"].sum() if not pred_sem_act.empty else c_dengue
+            dict_casos_estimados[prov] = int(p_val)
 
         for feat in geo_prov['features']:
-            prov_nombre = feat['properties'].get('provincia') or feat['properties'].get('PROVINCIA')
-            if not prov_nombre or prov_nombre not in provincias_filtradas:
+            prov_raw = (
+                feat['properties'].get('provincia')
+                or feat['properties'].get('PROVINCIA')
+                or feat['properties'].get('nam')
+                or feat['properties'].get('NAME_1')
+                or ''
+            )
+            prov_nombre = normalizar_provincia(prov_raw)
+
+            if not prov_nombre:
                 continue
 
-            c_tot = int(casos_dict.get(prov_nombre, 0))
-            d_alto = int(alto_dict.get(prov_nombre, 0))
-            d_tot = int(total_dict.get(prov_nombre, 0))
-            color = get_prov_color(c_tot)
+            score = dict_score_provincial.get(prov_nombre, 0.0)
+            color = obtener_color_calor(score)
+            det = dict_detalles_provincial.get(prov_nombre, {"alto": 0, "medio": 0, "bajo": 0, "tot": 0})
+
+            casos_r = dict_casos_reales.get(prov_nombre, 0)
+            casos_e = dict_casos_estimados.get(prov_nombre, 0)
+
+            if anio_mapa <= 2023:
+                texto_casos = f"🦠 Casos reales: <b>{casos_r:,}</b>"
+            elif 2024 <= anio_mapa <= 2025:
+                texto_casos = f"🦠 Casos reales: <b>{casos_r:,}</b><br>🔮 Casos estimados: <b>{casos_e:,}</b>"
+            else:
+                texto_casos = f"🔮 Casos estimados: <b>{casos_e:,}</b>"
 
             folium.GeoJson(
                 feat,
                 style_function=lambda x, c=color: {
                     'fillColor': c,
-                    'color': '#64748b',
+                    'color': '#475569',
                     'weight': 1.2,
-                    'fillOpacity': 0.75
+                    'fillOpacity': 0.8
                 },
                 highlight_function=lambda x: {
                     'fillOpacity': 0.95,
                     'weight': 2.5,
-                    'color': '#1a56db'
+                    'color': '#38bdf8'
                 },
                 tooltip=folium.Tooltip(
-                    f"<b>{prov_nombre}</b><br>"
-                    f"🦠 Casos estimados: <b>{c_tot:,}</b><br>"
-                    f"🔴 Deptos. en riesgo alto: <b>{d_alto}</b> / {d_tot}",
+                    f"<div style='font-family: sans-serif; font-size: 12px; min-width: 170px;'>"
+                    f"<b style='font-size: 14px;'>{prov_nombre}</b><br>"
+                    f"<hr style='margin:4px 0; border-color:#334155;'/>"
+                    f"{texto_casos}<br>"
+                    f"🔴 Deptos. riesgo alto: <b>{det['alto']}</b> / {det['tot']}<br>"
+                    f"🟡 Deptos. riesgo medio: <b>{det['medio']}</b><br>"
+                    f"🟢 Deptos. riesgo bajo: <b>{det['bajo']}</b>"
+                    f"</div>",
                     sticky=True
                 ),
             ).add_to(m_nac)
 
-        map_output = st_folium(m_nac, height=580, use_container_width=True, key="folium_mapa_nacional")
+        map_output = st_folium(m_nac, height=620, use_container_width=True, key="folium_mapa_nacional")
 
-        # Clic directo en el mapa para ir a la provincia
         if map_output and map_output.get("last_active_drawing"):
             props = map_output["last_active_drawing"]["properties"]
-            clicked_prov = props.get("provincia") or props.get("PROVINCIA")
+            raw_click = (
+                props.get("provincia") 
+                or props.get("PROVINCIA") 
+                or props.get("nam") 
+                or props.get("NAME_1") 
+                or ""
+            )
+            clicked_prov = normalizar_provincia(raw_click)
+            
             if clicked_prov and clicked_prov in provincias_filtradas and clicked_prov != st.session_state.provincia_seleccionada:
                 st.session_state.provincia_seleccionada = clicked_prov
                 st.rerun()
@@ -488,7 +533,6 @@ if menu_seleccionado == "Mapa de riesgo":
 
         riesgo_prov = riesgo_filtrado[riesgo_filtrado["provincia"] == prov_actual].copy()
         
-        # 1. Obtener casos de riesgo_prov o buscar directamente en pred si viene en 0
         casos_prov_totales = int(riesgo_prov["casos_dengue"].sum()) if "casos_dengue" in riesgo_prov.columns else 0
 
         if casos_prov_totales == 0:
@@ -500,12 +544,10 @@ if menu_seleccionado == "Mapa de riesgo":
             if not pred_prov_val.empty and "pred" in pred_prov_val.columns:
                 casos_prov_totales = int(pred_prov_val["pred"].sum())
 
-        # 2. Conteo de departamentos por nivel de riesgo
-        n_alto_p = int((riesgo_prov["nivel_mult"] == "alto").sum())
-        n_medio_p = int((riesgo_prov["nivel_mult"] == "medio").sum())
-        n_bajo_p = int((riesgo_prov["nivel_mult"] == "bajo").sum())
+        n_alto_p = int((riesgo_prov["nivel_mult"].astype(str).str.lower() == "alto").sum())
+        n_medio_p = int((riesgo_prov["nivel_mult"].astype(str).str.lower() == "medio").sum())
+        n_bajo_p = int((riesgo_prov["nivel_mult"].astype(str).str.lower() == "bajo").sum())
 
-        # 3. Renderizado dinámico (4 columnas si hay casos > 0, 3 columnas si es 0)
         if casos_prov_totales > 0:
             mc, ma, mm, mb = st.columns(4)
             mc.metric("🦠 Casos estimados prov.", f"{casos_prov_totales:,}")
@@ -532,14 +574,24 @@ if menu_seleccionado == "Mapa de riesgo":
 
         features_prov = [
             f for f in geo_dept['features'] 
-            if f['properties'].get('provincia') == prov_actual or f['properties'].get('PROVINCIA') == prov_actual
+            if normalizar_provincia(
+                f['properties'].get('provincia') or f['properties'].get('PROVINCIA') or f['properties'].get('nam') or ''
+            ) == prov_actual
         ]
         
         all_lats, all_lons = [], []
         for feat in features_prov:
-            for c in feat['geometry']['coordinates'][0]:
-                all_lons.append(c[0])
-                all_lats.append(c[1])
+            coords = feat['geometry']['coordinates']
+            if feat['geometry']['type'] == 'Polygon':
+                for c in coords[0]:
+                    all_lons.append(c[0])
+                    all_lats.append(c[1])
+            elif feat['geometry']['type'] == 'MultiPolygon':
+                for poly in coords:
+                    for c in poly[0]:
+                        all_lons.append(c[0])
+                        all_lats.append(c[1])
+
         centro_lat = sum(all_lats) / len(all_lats) if all_lats else -38
         centro_lon = sum(all_lons) / len(all_lons) if all_lons else -63
 
@@ -555,10 +607,10 @@ if menu_seleccionado == "Mapa de riesgo":
         m_dept = folium.Map(location=[centro_lat, centro_lon], zoom_start=zoom, tiles='CartoDB positron', scrollWheelZoom=True)
 
         for feat in features_prov:
-            did = str(feat['properties']['depto_id'])
+            did = str(feat['properties'].get('depto_id') or feat['properties'].get('id') or '')
             nivel = riesgo_dict.get(did, 'bajo')
             color = color_map.get(nivel, '#16a34a')
-            nombre = nombre_dept_dict.get(did, feat['properties']['nombre'])
+            nombre = nombre_dept_dict.get(did, feat['properties'].get('nombre') or feat['properties'].get('NAM') or 'Departamento')
             clima = clima_dict.get(did, 0)
             nbi = nbi_dict.get(did, 0)
 
@@ -568,7 +620,7 @@ if menu_seleccionado == "Mapa de riesgo":
                 highlight_function=lambda x: {'fillOpacity': 0.95, 'weight': 2.5, 'color': '#1a56db'},
                 tooltip=folium.Tooltip(
                     f"<b>{nombre}</b><br>"
-                    f"Nivel de Riesgo: <b>{nivel.capitalize()}</b><br>"
+                    f"Nivel de Riesgo: <b>{str(nivel).capitalize()}</b><br>"
                     f"Factor climático: {clima:.3f}<br>"
                     f"Score estructural: {nbi:.3f}", 
                     sticky=True
@@ -579,7 +631,7 @@ if menu_seleccionado == "Mapa de riesgo":
 
         with st.expander("📋 Ver clasificación de riesgo por departamento"):
             tabla_dept = riesgo_prov[["depto_nombre", "nivel_mult", "factor_clima", "score_terreno"]].copy()
-            tabla_dept["nivel_mult"] = tabla_dept["nivel_mult"].str.capitalize()
+            tabla_dept["nivel_mult"] = tabla_dept["nivel_mult"].astype(str).str.capitalize()
             tabla_dept.columns = ["Departamento", "Nivel de riesgo", "Factor climático", "Score estructural"]
             tabla_dept = tabla_dept.sort_values("Departamento")
             st.dataframe(tabla_dept, use_container_width=True, hide_index=True)
